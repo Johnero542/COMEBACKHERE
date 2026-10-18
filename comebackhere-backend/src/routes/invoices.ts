@@ -7,6 +7,7 @@ import { asyncHandler, NotFoundError } from "../lib/errors.js"
 import { cacheGet, cacheSet } from "../lib/cache.js"
 import { validateBody, validateParams, validateQuery } from "../middleware/validate.js"
 import { createInvoiceSchema, invoiceIdParamSchema, invoiceListQuerySchema } from "../schemas/index.js"
+import { getInvoiceStatus } from "./invoice-actions.js"
 
 const router = Router()
 
@@ -527,31 +528,23 @@ router.get("/", validateQuery(invoiceListQuerySchema), asyncHandler(async (req: 
 router.get("/:id", validateParams(invoiceIdParamSchema), asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params
 
-  const env = requireEnv({ invoiceContractId: "INVOICE_CONTRACT_ID" })
+  const env = requireEnv({ invoiceContractId: "INVOICE_CONTRACT_ID", rpcUrl: "SOROBAN_RPC_URL", signerSecret: "SIGNER_SECRET_KEY", networkPassphrase: "NETWORK_PASSPHRASE" })
 
-  const server = new SorobanRpc.Server(env.rpcUrl)
-  const contract = new Contract(env.invoiceContractId)
+  const db = await connectMongo()
+  const invoice = await getInvoicesCollection(db).findOne({ invoice_id: id })
 
-  // Build a read-only ledger entry query for the invoice
-  const ledgerKey = contract.getFootprint()
-  void ledgerKey // used below via getLedgerEntries
-
-  // Query the contract's ledger entry directly
-  const entries = await server.getLedgerEntries(
-    xdr.LedgerKey.contractData(
-      new xdr.LedgerKeyContractData({
-        contract: new Contract(env.invoiceContractId).address().toScAddress(),
-        key: nativeToScVal(BigInt(id), { type: "u64" }),
-        durability: xdr.ContractDataDurability.persistent(),
-      })
-    )
-  )
-
-  if (!entries.entries.length) {
+  if (!invoice) {
     throw new NotFoundError("Invoice not found")
   }
 
-  res.json({ invoice_id: id, status: "Pending" })
+  const status = await getInvoiceStatus(id, {
+    rpcUrl: env.rpcUrl,
+    invoiceContractId: env.invoiceContractId,
+    signerSecret: env.signerSecret,
+    networkPassphrase: env.networkPassphrase,
+  })
+
+  res.json({ invoice_id: id, status, due_date: invoice.due_date })
 }))
 
 /**
